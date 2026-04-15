@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.next/
+node_modules/
+dist/
+.env
+ml/checkpoints/
+ml/datasets/
+storage/
+backend/.venv/
+frontend/node_modules/
+frontend/.next/
