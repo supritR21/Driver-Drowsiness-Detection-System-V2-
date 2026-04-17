@@ -257,7 +257,7 @@ export default function LiveMonitor() {
 
       intervalRef.current = window.setInterval(() => {
         void captureAndSend();
-      }, 1000);
+      }, 400);
     } catch (error) {
       setPermissionError(
         error instanceof Error

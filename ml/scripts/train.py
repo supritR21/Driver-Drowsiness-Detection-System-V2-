@@ -1,144 +1,234 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-import matplotlib.pyplot as plt
+import json
+import random
 import numpy as np
+import matplotlib.pyplot as plt
+
 import torch
 import torch.nn as nn
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
-from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader
 
-from dataset import DrowsinessDataset
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score
+
 from model import DrowsinessBiLSTM
 
+# =========================
+# CONFIG
+# =========================
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "datasets" / "processed"
 CKPT_DIR = BASE_DIR / "checkpoints"
-CKPT_DIR.mkdir(parents=True, exist_ok=True)
+CKPT_DIR.mkdir(exist_ok=True)
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+BATCH_SIZE = 64
+EPOCHS = 20
+LR = 1e-3
+SEED = 42
 
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 
-def plot_curve(values, title, filename):
-    plt.figure()
-    plt.plot(values)
-    plt.title(title)
-    plt.xlabel("Epoch")
-    plt.ylabel(title)
-    plt.tight_layout()
-    plt.savefig(CKPT_DIR / filename)
-    plt.close()
+# =========================
+# LOAD DATA
+# =========================
+X = np.load(DATA_DIR / "X.npy")
+y = np.load(DATA_DIR / "y.npy")
 
+with open(DATA_DIR / "meta.json", "r", encoding="utf-8") as f:
+    meta = json.load(f)
 
-def main():
-    X_path = DATA_DIR / "X.npy"
-    Y_path = DATA_DIR / "y.npy"
+# =========================
+# VIDEO LEVEL SPLIT
+# =========================
+video_to_indices = {}
 
-    dataset = DrowsinessDataset(X_path, Y_path)
+for idx, item in enumerate(meta):
+    vid = item["video"]
+    if vid not in video_to_indices:
+        video_to_indices[vid] = []
+    video_to_indices[vid].append(idx)
 
-    indices = np.arange(len(dataset))
-    train_idx, temp_idx = train_test_split(indices, test_size=0.30, random_state=42, stratify=dataset.y)
-    val_idx, test_idx = train_test_split(temp_idx, test_size=0.50, random_state=42, stratify=dataset.y[temp_idx])
+videos = list(video_to_indices.keys())
+random.shuffle(videos)
 
-    train_loader = DataLoader(Subset(dataset, train_idx), batch_size=32, shuffle=True)
-    val_loader = DataLoader(Subset(dataset, val_idx), batch_size=32, shuffle=False)
-    test_loader = DataLoader(Subset(dataset, test_idx), batch_size=32, shuffle=False)
+n = len(videos)
+train_videos = videos[: int(0.7 * n)]
+val_videos = videos[int(0.7 * n): int(0.85 * n)]
+test_videos = videos[int(0.85 * n):]
 
-    model = DrowsinessBiLSTM().to(DEVICE)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+def collect_indices(video_list):
+    idxs = []
+    for v in video_list:
+        idxs.extend(video_to_indices[v])
+    return idxs
 
-    best_val_f1 = 0.0
-    train_losses = []
-    val_losses = []
+train_idx = collect_indices(train_videos)
+val_idx = collect_indices(val_videos)
+test_idx = collect_indices(test_videos)
 
-    for epoch in range(20):
-        model.train()
-        running_loss = 0.0
+print("Train videos:", len(train_videos))
+print("Val videos:", len(val_videos))
+print("Test videos:", len(test_videos))
 
-        for x, y in train_loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
+print("Train samples:", len(train_idx))
+print("Val samples:", len(val_idx))
+print("Test samples:", len(test_idx))
 
-            optimizer.zero_grad()
-            logits, _ = model(x)
-            loss = criterion(logits, y)
-            loss.backward()
-            optimizer.step()
+# =========================
+# NORMALIZATION
+# =========================
+X_train = X[train_idx]
 
-            running_loss += loss.item()
+mean = X_train.mean(axis=(0, 1), keepdims=True)
+std = X_train.std(axis=(0, 1), keepdims=True) + 1e-6
 
-        avg_train_loss = running_loss / max(1, len(train_loader))
-        train_losses.append(avg_train_loss)
+X = (X - mean) / std
 
-        model.eval()
-        val_preds = []
-        val_targets = []
-        val_running_loss = 0.0
+np.save(CKPT_DIR / "feature_mean.npy", mean)
+np.save(CKPT_DIR / "feature_std.npy", std)
 
-        with torch.no_grad():
-            for x, y in val_loader:
-                x, y = x.to(DEVICE), y.to(DEVICE)
-                logits, _ = model(x)
-                loss = criterion(logits, y)
-                val_running_loss += loss.item()
+# =========================
+# DATASET
+# =========================
+class SeqDataset(Dataset):
+    def __init__(self, indices):
+        self.indices = indices
 
-                preds = torch.argmax(logits, dim=1)
-                val_preds.extend(preds.cpu().numpy())
-                val_targets.extend(y.cpu().numpy())
+    def __len__(self):
+        return len(self.indices)
 
-        avg_val_loss = val_running_loss / max(1, len(val_loader))
-        val_losses.append(avg_val_loss)
-
-        val_acc = accuracy_score(val_targets, val_preds)
-        val_f1 = f1_score(val_targets, val_preds, average="macro")
-
-        print(
-            f"Epoch {epoch+1:02d} | "
-            f"train_loss={avg_train_loss:.4f} | "
-            f"val_loss={avg_val_loss:.4f} | "
-            f"val_acc={val_acc:.4f} | "
-            f"val_f1={val_f1:.4f}"
+    def __getitem__(self, i):
+        idx = self.indices[i]
+        return (
+            torch.tensor(X[idx], dtype=torch.float32),
+            torch.tensor(y[idx], dtype=torch.long),
         )
 
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "input_dim": 10,
-                    "hidden_dim": 128,
-                    "num_layers": 2,
-                    "num_classes": 3,
-                },
-                CKPT_DIR / "drowsiness_bilstm.pt",
-            )
-            print("Saved best checkpoint.")
+train_loader = DataLoader(SeqDataset(train_idx), batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(SeqDataset(val_idx), batch_size=BATCH_SIZE)
+test_loader = DataLoader(SeqDataset(test_idx), batch_size=BATCH_SIZE)
 
-    plot_curve(train_losses, "Training Loss", "train_loss.png")
-    plot_curve(val_losses, "Validation Loss", "val_loss.png")
+# =========================
+# MODEL
+# =========================
+model = DrowsinessBiLSTM().to(DEVICE)
 
-    checkpoint = torch.load(CKPT_DIR / "drowsiness_bilstm.pt", map_location=DEVICE)
-    model.load_state_dict(checkpoint["model_state_dict"])
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+
+best_f1 = 0
+train_losses = []
+val_losses = []
+
+# =========================
+# TRAIN LOOP
+# =========================
+for epoch in range(EPOCHS):
+    model.train()
+    total_loss = 0
+
+    for xb, yb in train_loader:
+        xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+
+        optimizer.zero_grad()
+        logits, _ = model(xb)
+        loss = criterion(logits, yb)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    avg_train = total_loss / len(train_loader)
+    train_losses.append(avg_train)
+
+    # Validation
     model.eval()
-
-    test_preds = []
-    test_targets = []
+    preds = []
+    true = []
+    total_val_loss = 0
 
     with torch.no_grad():
-        for x, y in test_loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
-            logits, _ = model(x)
-            preds = torch.argmax(logits, dim=1)
-            test_preds.extend(preds.cpu().numpy())
-            test_targets.extend(y.cpu().numpy())
+        for xb, yb in val_loader:
+            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
 
-    print("\nTest accuracy:", accuracy_score(test_targets, test_preds))
-    print("Test F1:", f1_score(test_targets, test_preds, average="macro"))
-    print("\nClassification report:\n", classification_report(test_targets, test_preds))
-    print("\nConfusion matrix:\n", confusion_matrix(test_targets, test_preds))
+            logits, _ = model(xb)
+            loss = criterion(logits, yb)
 
+            total_val_loss += loss.item()
 
-if __name__ == "__main__":
-    main()
+            p = torch.argmax(logits, dim=1)
+            preds.extend(p.cpu().numpy())
+            true.extend(yb.cpu().numpy())
+
+    avg_val = total_val_loss / len(val_loader)
+    val_losses.append(avg_val)
+
+    acc = accuracy_score(true, preds)
+    f1 = f1_score(true, preds, average="macro")
+
+    print(
+        f"Epoch {epoch+1:02d} | "
+        f"train_loss={avg_train:.4f} | "
+        f"val_loss={avg_val:.4f} | "
+        f"val_acc={acc:.4f} | "
+        f"val_f1={f1:.4f}"
+    )
+
+    if f1 > best_f1:
+        best_f1 = f1
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "mean_file": "feature_mean.npy",
+                "std_file": "feature_std.npy",
+            },
+            CKPT_DIR / "drowsiness_bilstm.pt",
+        )
+        print("✅ Best model saved")
+
+# =========================
+# TEST
+# =========================
+print("\nLoading best model...")
+ckpt = torch.load(CKPT_DIR / "drowsiness_bilstm.pt")
+model.load_state_dict(ckpt["model_state_dict"])
+model.eval()
+
+preds = []
+true = []
+
+with torch.no_grad():
+    for xb, yb in test_loader:
+        xb = xb.to(DEVICE)
+
+        logits, _ = model(xb)
+        p = torch.argmax(logits, dim=1)
+
+        preds.extend(p.cpu().numpy())
+        true.extend(yb.numpy())
+
+print("\nTEST ACC:", accuracy_score(true, preds))
+print("TEST F1:", f1_score(true, preds, average="macro"))
+
+print("\nClassification Report")
+print(classification_report(true, preds))
+
+print("\nConfusion Matrix")
+print(confusion_matrix(true, preds))
+
+# =========================
+# PLOTS
+# =========================
+plt.plot(train_losses)
+plt.title("Train Loss")
+plt.savefig(CKPT_DIR / "train_loss.png")
+plt.close()
+
+plt.plot(val_losses)
+plt.title("Val Loss")
+plt.savefig(CKPT_DIR / "val_loss.png")
+plt.close()
