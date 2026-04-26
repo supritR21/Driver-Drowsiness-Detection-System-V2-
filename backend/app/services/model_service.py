@@ -12,7 +12,7 @@ from app.services.model_arch import DrowsinessBiLSTM
 class ModelService:
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.seq_len = 30
+        self.seq_len = 45
         self.input_dim = 10
 
         self.model = DrowsinessBiLSTM(input_dim=self.input_dim).to(self.device)
@@ -59,7 +59,7 @@ class ModelService:
     def _normalize_sequence(self, seq: np.ndarray) -> np.ndarray:
         seq = np.asarray(seq, dtype=np.float32)
 
-        # Ensure we always work with a real 2D sequence: (30, 10)
+        # Ensure we always work with a real 2D sequence: (seq_len, input_dim)
         if seq.ndim == 3 and seq.shape[0] == 1:
             seq = seq[0]
 

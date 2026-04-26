@@ -15,8 +15,11 @@ from app.services.session_state import SessionStateStore
 router = APIRouter(prefix="/inference", tags=["Inference"])
 
 feature_extractor = FeatureExtractor()
-session_store = SessionStateStore(seq_len=30)
+session_store = SessionStateStore(seq_len=45)
 alert_engine = AlertEngine()
+
+# Store last smoothed score per session for realtime smoothing
+score_store: dict[str, float] = {}
 
 
 def decode_frame_base64(frame_base64: str) -> np.ndarray:
@@ -65,17 +68,23 @@ def process_frame(session_id: str, frame_bgr: np.ndarray) -> FrameInferenceRespo
     labels = ["alert", "drowsy", "microsleep"]
     prediction = labels[prediction_idx]
 
+    # Raw score from model output
     fatigue_score = float(probs[1] * 50.0 + probs[2] * 100.0)
 
+    # Smooth score to avoid sudden jumps and reduce lag
+    previous_score = score_store.get(session_id, fatigue_score)
+    smoothed_score = 0.7 * previous_score + 0.3 * fatigue_score
+    score_store[session_id] = smoothed_score
+
     previous_level = session_store.get_last_level(session_id)
-    alert_result = alert_engine.evaluate(fatigue_score, previous_level=previous_level)
+    alert_result = alert_engine.evaluate(smoothed_score, previous_level=previous_level)
     session_store.set_last_level(session_id, alert_result["level"])
 
     return FrameInferenceResponse(
         status="ok",
         session_id=session_id,
         sequence_length=len(sequence),
-        score=round(fatigue_score, 2),
+        score=round(smoothed_score, 2),
         level=alert_result["level"],
         prediction=prediction,
         message=alert_result["message"],

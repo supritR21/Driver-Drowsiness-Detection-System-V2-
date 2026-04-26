@@ -5,14 +5,16 @@ import {
   AlertTriangle,
   Camera,
   CircleStop,
+  Download,
   Play,
   Radio,
   ShieldAlert,
+  SquareDot,
+  SquareStop,
 } from "lucide-react";
 import { sendFrame } from "@/lib/api";
 import type { InferenceResponse } from "@/types/inference";
-
-type StatusColor = "safe" | "soft" | "warning" | "danger" | "idle";
+import FaceMeshBox from "@/components/FaceMeshBox";
 
 function statusColor(level: InferenceResponse["level"] | "idle"): string {
   switch (level) {
@@ -50,12 +52,18 @@ export default function LiveMonitor() {
   const streamRef = useRef<MediaStream | null>(null);
   const intervalRef = useRef<number | null>(null);
 
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
+
   const audioContextRef = useRef<AudioContext | null>(null);
   const alarmTimerRef = useRef<number | null>(null);
 
   const [sessionId] = useState("demo-session");
   const [isRunning, setIsRunning] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [downloadUrl, setDownloadUrl] = useState<string>("");
+
   const [backendStatus, setBackendStatus] = useState<string>("idle");
   const [sequenceLength, setSequenceLength] = useState<number>(0);
   const [score, setScore] = useState<number | null>(null);
@@ -65,7 +73,6 @@ export default function LiveMonitor() {
   const [source, setSource] = useState<string>("—");
   const [permissionError, setPermissionError] = useState<string>("");
 
-  // ---------- AUDIO ALARM SYSTEM ----------
   const ensureAudioContext = async () => {
     if (typeof window === "undefined") return null;
 
@@ -106,7 +113,6 @@ export default function LiveMonitor() {
     gainNode.connect(ctx.destination);
 
     const now = ctx.currentTime;
-
     gainNode.gain.setValueAtTime(Math.max(0.0001, volume), now);
     gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration);
 
@@ -114,18 +120,17 @@ export default function LiveMonitor() {
     oscillator.stop(now + duration);
   };
 
-  const getAlarmVolume = (scoreValue: number | null, levelValue: InferenceResponse["level"] | "idle") => {
+  const getAlarmVolume = (
+    scoreValue: number | null,
+    levelValue: InferenceResponse["level"] | "idle"
+  ) => {
     if (scoreValue === null || !levelValue || levelValue === "idle" || levelValue === "safe") {
       return 0;
     }
 
     const s = Math.max(0, Math.min(100, scoreValue));
-
-    // Base volume rises with score:
-    // 30 -> low, 50 -> medium, 75+ -> loud
     let volume = 0.03 + (s / 100) * 0.12;
 
-    // Make louder for more serious levels
     if (levelValue === "soft") volume *= 0.8;
     if (levelValue === "warning") volume *= 1.05;
     if (levelValue === "danger") volume *= 1.2;
@@ -152,16 +157,14 @@ export default function LiveMonitor() {
 
     const s = Math.max(0, Math.min(100, scoreValue));
     const volume = getAlarmVolume(scoreValue, levelValue);
-
-    // Higher score => higher tone
-    const baseFreq = 320 + s * 8; // approx 320Hz to 1120Hz
+    const baseFreq = 320 + s * 8;
 
     const pattern =
       levelValue === "soft"
         ? { beeps: 1, repeat: 2400, gap: 220 }
         : levelValue === "warning"
         ? { beeps: 2, repeat: 1400, gap: 170 }
-        : { beeps: 3, repeat: 750, gap: 130 }; // danger
+        : { beeps: 3, repeat: 750, gap: 130 };
 
     const playPattern = () => {
       for (let i = 0; i < pattern.beeps; i++) {
@@ -176,7 +179,43 @@ export default function LiveMonitor() {
     playPattern();
   };
 
-  // ---------- CAMERA ----------
+  const startRecording = () => {
+    if (!streamRef.current) return;
+
+    try {
+      chunksRef.current = [];
+      const recorder = new MediaRecorder(streamRef.current, {
+        mimeType: "video/webm;codecs=vp8",
+      });
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: "video/webm" });
+        const url = URL.createObjectURL(blob);
+        setDownloadUrl(url);
+      };
+
+      recorder.start();
+      recorderRef.current = recorder;
+      setIsRecording(true);
+    } catch {
+      setPermissionError("Recording is not supported in this browser.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
+    recorderRef.current = null;
+    setIsRecording(false);
+  };
+
   const stopCamera = () => {
     if (intervalRef.current) {
       window.clearInterval(intervalRef.current);
@@ -190,6 +229,10 @@ export default function LiveMonitor() {
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
+    }
+
+    if (isRecording) {
+      stopRecording();
     }
 
     setIsRunning(false);
@@ -272,8 +315,13 @@ export default function LiveMonitor() {
   useEffect(() => {
     return () => {
       stopCamera();
+
       if (audioContextRef.current) {
         audioContextRef.current.close().catch(() => {});
+      }
+
+      if (downloadUrl) {
+        URL.revokeObjectURL(downloadUrl);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -283,17 +331,15 @@ export default function LiveMonitor() {
   const borderClass = statusBorder(level);
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
-      <div className={`rounded-3xl border ${borderClass} bg-slate-950 p-4 shadow-xl`}>
-        <div className="mb-4 flex items-center justify-between gap-3">
+    <div className="grid h-full min-h-0 gap-4 xl:grid-cols-[1.1fr_1fr_0.9fr]">
+      <section className={`flex min-h-0 flex-col rounded-3xl border ${borderClass} bg-slate-950 p-4 shadow-xl`}>
+        <div className="mb-3 flex items-center justify-between gap-3">
           <div>
             <h2 className="text-xl font-semibold text-white">Live Driver Monitoring</h2>
-            <p className="text-sm text-slate-400">
-              Webcam capture → feature extraction → temporal inference
-            </p>
+            <p className="text-sm text-slate-400">Clear webcam feed</p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {!isRunning ? (
               <button
                 onClick={startCamera}
@@ -312,17 +358,57 @@ export default function LiveMonitor() {
                 Stop
               </button>
             )}
+
+            {isRunning && !isRecording ? (
+              <button
+                onClick={startRecording}
+                className="inline-flex items-center gap-2 rounded-2xl bg-red-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-400"
+              >
+                <SquareDot className="h-4 w-4" />
+                Record
+              </button>
+            ) : null}
+
+            {isRecording ? (
+              <button
+                onClick={stopRecording}
+                className="inline-flex items-center gap-2 rounded-2xl bg-red-700 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-600"
+              >
+                <SquareStop className="h-4 w-4" />
+                Stop Recording
+              </button>
+            ) : null}
           </div>
         </div>
 
-        <div className="relative overflow-hidden rounded-3xl border border-slate-800 bg-black">
+        <div className="relative min-h-80 flex-1 overflow-hidden rounded-3xl border border-slate-800 bg-black">
           <video
             ref={videoRef}
-            className="aspect-video w-full object-cover"
+            className="h-full w-full object-contain bg-black"
             playsInline
             muted
             autoPlay
           />
+
+          <div className="absolute left-4 top-4 rounded-2xl border border-slate-700 bg-slate-950/80 px-4 py-3 backdrop-blur">
+            <div className="text-xs uppercase tracking-[0.2em] text-slate-400">Score</div>
+            <div className="text-3xl font-bold text-white">
+              {score === null ? "—" : score.toFixed(1)}
+            </div>
+            <div className="mt-1 text-xs text-slate-400 capitalize">
+              {level === "idle" ? "idle" : level}
+            </div>
+          </div>
+
+          <div className="absolute right-4 top-4 flex items-center gap-2 rounded-full border border-slate-700 bg-slate-950/80 px-3 py-2 text-xs text-slate-200 backdrop-blur">
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${
+                isRecording ? "bg-red-500" : "bg-slate-500"
+              }`}
+            />
+            {isRecording ? "Recording" : "Not recording"}
+          </div>
+
           {!isRunning && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/70">
               <div className="text-center">
@@ -335,31 +421,42 @@ export default function LiveMonitor() {
 
         <canvas ref={canvasRef} className="hidden" />
 
+        {downloadUrl ? (
+          <div className="mt-3 flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-900 p-3">
+            <Download className="h-4 w-4 text-cyan-400" />
+            <a
+              href={downloadUrl}
+              download="drowsiness-recording.webm"
+              className="text-sm font-medium text-cyan-400 hover:underline"
+            >
+              Download last recording
+            </a>
+          </div>
+        ) : null}
+
         {permissionError ? (
-          <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+          <div className="mt-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
             {permissionError}
           </div>
         ) : null}
-      </div>
+      </section>
 
-      <div className="grid gap-4">
-        <div className="rounded-3xl border border-slate-800 bg-slate-950 p-4 shadow-xl">
-          <div className="mb-4 flex items-center gap-2">
-            <Radio className="h-5 w-5 text-cyan-400" />
-            <h3 className="text-lg font-semibold text-white">Live Status</h3>
-          </div>
-
-          <div className="grid gap-3">
-            <Stat label="Session ID" value={sessionId} />
-            <Stat label="Backend" value={backendStatus} />
-            <Stat label="Sequence" value={`${sequenceLength} / 30`} />
-            <Stat label="Score" value={score === null ? "—" : score.toFixed(2)} />
-            <Stat label="Prediction" value={prediction} />
-            <Stat label="Source" value={source} />
-          </div>
+      <section className="flex min-h-0 flex-col rounded-3xl border border-slate-800 bg-slate-950 p-4 shadow-xl">
+        <div className="mb-3 flex items-center gap-2">
+          <Radio className="h-5 w-5 text-cyan-400" />
+          <h3 className="text-lg font-semibold text-white">Live Status</h3>
         </div>
 
-        <div className={`rounded-3xl border ${borderClass} bg-slate-950 p-4 shadow-xl`}>
+        <div className="grid gap-2">
+          <Stat label="Session ID" value={sessionId} />
+          <Stat label="Backend" value={backendStatus} />
+          <Stat label="Sequence" value={`${sequenceLength} / 45`} />
+          <Stat label="Score" value={score === null ? "—" : score.toFixed(2)} />
+          <Stat label="Prediction" value={prediction} />
+          <Stat label="Source" value={source} />
+        </div>
+
+        <div className={`mt-4 rounded-3xl border ${borderClass} bg-slate-900 p-4`}>
           <div className="mb-3 flex items-center gap-2">
             <ShieldAlert className="h-5 w-5 text-white" />
             <h3 className="text-lg font-semibold text-white">Alert State</h3>
@@ -372,21 +469,24 @@ export default function LiveMonitor() {
             {level === "idle" ? "idle" : level}
           </div>
 
-          <p className="mt-4 text-sm leading-6 text-slate-300">{message}</p>
+          <p className="mt-3 text-sm leading-6 text-slate-300">{message}</p>
 
-          <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-900 p-3 text-xs text-slate-400">
-            The system sends one frame per second. After 30 frames, the BiLSTM pipeline starts returning
-            real predictions.
+          <div className="mt-3 rounded-2xl border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
+            Frames are sent every 0.4 seconds. The score updates live after the temporal window fills.
           </div>
         </div>
-      </div>
+      </section>
+
+      <section className="flex min-h-0 flex-col">
+        <FaceMeshBox videoRef={videoRef} active={isRunning} />
+      </section>
     </div>
   );
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3">
+    <div className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-900 px-4 py-2.5">
       <span className="text-sm text-slate-400">{label}</span>
       <span className="text-sm font-medium text-white">{value}</span>
     </div>

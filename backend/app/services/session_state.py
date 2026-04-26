@@ -8,7 +8,7 @@ import numpy as np
 
 
 class SessionStateStore:
-    def __init__(self, seq_len: int = 30):
+    def __init__(self, seq_len: int = 45):
         self.seq_len = seq_len
         self._buffers: dict[str, Deque[np.ndarray]] = defaultdict(lambda: deque(maxlen=seq_len))
         self._last_level: dict[str, str] = {}

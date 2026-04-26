@@ -11,7 +11,7 @@ import mediapipe as mp
 from tqdm import tqdm
 
 
-SEQ_LEN = 30
+SEQ_LEN = 45
 BASE_DIR = Path(__file__).resolve().parents[1]
 INPUT_DIR = BASE_DIR / "datasets" / "raw"
 OUTPUT_DIR = BASE_DIR / "datasets" / "processed"
@@ -165,14 +165,18 @@ def extract_sequences_from_video(video_path: Path, extractor: FeatureExtractor):
             break
 
         feat = extractor.extract(frame)
+
         if feat is None:
             continue
+
+        # DATA AUGMENTATION
+        feat += np.random.normal(0, 0.01, feat.shape)
 
         sequence.append(feat)
 
         if len(sequence) == SEQ_LEN:
             sequences.append(np.stack(sequence, axis=0))
-            sequence = sequence[1:]  # sliding window
+            sequence = sequence[1:]   # sliding window
 
     cap.release()
     return sequences
