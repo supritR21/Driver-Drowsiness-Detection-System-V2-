@@ -12,5 +12,6 @@ class Settings(BaseSettings):
     secret_key: str = "change-this-later"
     access_token_expire_minutes: int = 60
     model_path: str = "../storage/models/drowsiness_bilstm.pt"
+    transformer_model_path: str = "../ml/checkpoints/best_transformer_deploy.pt"
 
 settings = Settings()

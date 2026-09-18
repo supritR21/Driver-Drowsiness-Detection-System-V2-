@@ -1,27 +1,65 @@
 import { InferenceResponse } from "@/types/inference";
 
+
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
+  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  "http://127.0.0.1:8000/api/v1";
+
 
 export async function sendFrame(
   sessionId: string,
   frameBase64: string
 ): Promise<InferenceResponse> {
-  const res = await fetch(`${API_BASE}/inference/frame`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      session_id: sessionId,
-      frame_base64: frameBase64,
-    }),
-  });
+
+  const res = await fetch(
+    `${API_BASE}/inference/frame`,
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+      },
+
+      body: JSON.stringify({
+        session_id: sessionId,
+        frame_base64: frameBase64,
+      }),
+    }
+  );
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "Failed to send frame");
+
+    const text =
+      await res.text();
+
+    throw new Error(
+      text ||
+        "Failed to send frame"
+    );
   }
 
   return res.json();
+}
+
+
+export function getTransformerWebSocketUrl(
+  sessionId: string
+): string {
+
+  const wsBase =
+    API_BASE
+      .replace(
+        /^http:/,
+        "ws:"
+      )
+      .replace(
+        /^https:/,
+        "wss:"
+      );
+
+  return (
+    `${wsBase}` +
+    `/inference/ws/transformer/` +
+    `${encodeURIComponent(sessionId)}`
+  );
 }
