@@ -21,4 +21,4 @@ orjson>=3.10,<4
 loguru>=0.7,<1
 pyyaml>=6.0,<7
 email-validator>=2.0,<3
-bcrypt>=3.2,<4.0
+bcrypt>=3.2,<4.0cd va

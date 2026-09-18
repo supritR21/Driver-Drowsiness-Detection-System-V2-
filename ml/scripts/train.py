@@ -17,8 +17,12 @@ from sklearn.metrics import (
     confusion_matrix,
     accuracy_score,
     f1_score,
+    roc_curve,
+    auc,
+    roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import label_binarize
 
 from model import DrowsinessBiLSTM
 
@@ -37,9 +41,88 @@ PATIENCE = 20
 LR = 3e-4
 SEED = 42
 
+CLASS_NAMES = ["alert", "drowsy", "microsleep"]
+
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
+
+# =========================
+# HELPERS
+# =========================
+def save_confusion_matrix(cm: np.ndarray, classes: list[str], path: Path, normalize: bool = False) -> None:
+    if normalize:
+        cm = cm.astype(np.float32)
+        row_sums = cm.sum(axis=1, keepdims=True)
+        cm = np.divide(cm, row_sums, out=np.zeros_like(cm), where=row_sums != 0)
+
+    plt.figure(figsize=(7, 6))
+    plt.imshow(cm, interpolation="nearest")
+    plt.title("Normalized Confusion Matrix" if normalize else "Confusion Matrix")
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=30, ha="right")
+    plt.yticks(tick_marks, classes)
+
+    fmt = ".2f" if normalize else "d"
+    thresh = cm.max() / 2.0 if cm.size else 0
+
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(
+                j,
+                i,
+                format(cm[i, j], fmt),
+                ha="center",
+                va="center",
+                color="white" if cm[i, j] > thresh else "black",
+            )
+
+    plt.ylabel("True Label")
+    plt.xlabel("Predicted Label")
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+
+
+def save_roc_curves(y_true: np.ndarray, y_prob: np.ndarray, classes: list[str], path: Path) -> dict[str, float]:
+    y_true_bin = label_binarize(y_true, classes=[0, 1, 2])
+
+    plt.figure(figsize=(8, 7))
+
+    auc_scores: dict[str, float] = {}
+
+    for i, class_name in enumerate(classes):
+        # Skip ROC if a class is absent in y_true
+        if len(np.unique(y_true_bin[:, i])) < 2:
+            continue
+
+        fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_prob[:, i])
+        roc_auc = auc(fpr, tpr)
+        auc_scores[class_name] = float(roc_auc)
+
+        plt.plot(fpr, tpr, linewidth=2, label=f"{class_name} (AUC = {roc_auc:.3f})")
+
+    # micro-average
+    try:
+        micro_auc = roc_auc_score(y_true_bin, y_prob, average="micro", multi_class="ovr")
+        auc_scores["micro"] = float(micro_auc)
+    except Exception:
+        micro_auc = None
+
+    plt.plot([0, 1], [0, 1], "k--", linewidth=1)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curves")
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+
+    return auc_scores
+
 
 # =========================
 # LOAD DATA
@@ -53,7 +136,6 @@ with open(DATA_DIR / "meta.json", "r", encoding="utf-8") as f:
 # =========================
 # VIDEO-LEVEL + CLASS-AWARE SPLIT
 # =========================
-# Build video -> class mapping
 video_to_class: dict[str, int] = {}
 for item in meta:
     video_to_class[item["video"]] = int(item["class_idx"])
@@ -101,7 +183,6 @@ for c in [0, 1, 2]:
     val_videos.extend(va)
     test_videos.extend(te)
 
-# Reproducible shuffle of combined lists
 random.shuffle(train_videos)
 random.shuffle(val_videos)
 random.shuffle(test_videos)
@@ -141,7 +222,6 @@ X = (X - mean) / std
 np.save(CKPT_DIR / "feature_mean.npy", mean)
 np.save(CKPT_DIR / "feature_std.npy", std)
 
-# Save split info for reproducibility
 with open(CKPT_DIR / "split_info.json", "w", encoding="utf-8") as f:
     json.dump(
         {
@@ -169,7 +249,6 @@ class SeqDataset(Dataset):
         x = torch.tensor(X[idx], dtype=torch.float32)
         y_item = torch.tensor(y[idx], dtype=torch.long)
 
-        # Training-only feature jitter to help generalization
         if self.augment:
             if torch.rand(1).item() < 0.5:
                 x = x + torch.randn_like(x) * 0.01
@@ -190,7 +269,6 @@ test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 # =========================
 model = DrowsinessBiLSTM().to(DEVICE)
 
-# Dynamic class weights from TRAIN split only
 train_labels = y[train_idx]
 counts = Counter(train_labels.tolist())
 total = len(train_labels)
@@ -242,7 +320,6 @@ for epoch in range(EPOCHS):
     avg_train = total_loss / max(1, len(train_loader))
     train_losses.append(avg_train)
 
-    # Validation
     model.eval()
     preds = []
     true = []
@@ -313,43 +390,80 @@ model.eval()
 
 preds = []
 true = []
+all_probs = []
 
 with torch.no_grad():
     for xb, yb in test_loader:
         xb = xb.to(DEVICE)
 
         logits, _ = model(xb)
-        p = torch.argmax(logits, dim=1)
+        probs = torch.softmax(logits, dim=1)
+
+        p = torch.argmax(probs, dim=1)
 
         preds.extend(p.cpu().numpy())
         true.extend(yb.cpu().numpy())
+        all_probs.extend(probs.cpu().numpy())
 
-print("\nTEST ACC:", accuracy_score(true, preds))
-print("TEST F1:", f1_score(true, preds, average="macro"))
+true_arr = np.array(true, dtype=np.int64)
+preds_arr = np.array(preds, dtype=np.int64)
+probs_arr = np.array(all_probs, dtype=np.float32)
+
+test_acc = accuracy_score(true_arr, preds_arr)
+test_f1 = f1_score(true_arr, preds_arr, average="macro")
+
+print("\nTEST ACC:", test_acc)
+print("TEST F1:", test_f1)
+
+report = classification_report(true_arr, preds_arr, target_names=CLASS_NAMES, zero_division=0)
+cm = confusion_matrix(true_arr, preds_arr)
 
 print("\nClassification Report")
-print(classification_report(true, preds, zero_division=0))
+print(report)
 
 print("\nConfusion Matrix")
-print(confusion_matrix(true, preds))
+print(cm)
+
+# Save report and metrics
+with open(CKPT_DIR / "classification_report.txt", "w", encoding="utf-8") as f:
+    f.write(report)
+
+metrics = {
+    "test_accuracy": float(test_acc),
+    "test_f1_macro": float(test_f1),
+    "best_val_f1": float(best_f1),
+    "best_epoch": int(best_epoch),
+    "train_class_counts": {str(k): int(v) for k, v in counts.items()},
+}
+with open(CKPT_DIR / "metrics.json", "w", encoding="utf-8") as f:
+    json.dump(metrics, f, indent=2)
 
 # =========================
 # PLOTS
 # =========================
-plt.figure()
-plt.plot(train_losses)
-plt.title("Train Loss")
+plt.figure(figsize=(8, 5))
+plt.plot(train_losses, label="Train Loss")
+plt.plot(val_losses, label="Val Loss")
+plt.title("Training and Validation Loss")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
+plt.legend()
 plt.tight_layout()
-plt.savefig(CKPT_DIR / "train_loss.png")
+plt.savefig(CKPT_DIR / "loss_curves.png", dpi=200)
 plt.close()
 
-plt.figure()
-plt.plot(val_losses)
-plt.title("Val Loss")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.tight_layout()
-plt.savefig(CKPT_DIR / "val_loss.png")
-plt.close()
+save_confusion_matrix(cm, CLASS_NAMES, CKPT_DIR / "confusion_matrix.png", normalize=False)
+save_confusion_matrix(cm, CLASS_NAMES, CKPT_DIR / "confusion_matrix_normalized.png", normalize=True)
+
+auc_scores = save_roc_curves(true_arr, probs_arr, CLASS_NAMES, CKPT_DIR / "roc_curves.png")
+metrics["roc_auc"] = auc_scores
+with open(CKPT_DIR / "metrics.json", "w", encoding="utf-8") as f:
+    json.dump(metrics, f, indent=2)
+
+print("\nSaved:")
+print(" - loss_curves.png")
+print(" - confusion_matrix.png")
+print(" - confusion_matrix_normalized.png")
+print(" - roc_curves.png")
+print(" - classification_report.txt")
+print(" - metrics.json")

@@ -6,48 +6,55 @@ class AlertEngine:
         self.level_order = ["safe", "soft", "warning", "danger"]
 
     def _level_from_score(self, score: float) -> str:
-        if score < 30:
+        # Better aligned with new hybrid score logic
+        if score < 35:
             return "safe"
-        if score < 50:
+        if score < 55:
             return "soft"
-        if score < 75:
+        if score < 78:
             return "warning"
         return "danger"
 
     def evaluate(self, score: float, previous_level: str = "safe") -> dict:
         desired = self._level_from_score(score)
 
-        # Hysteresis rules
+        # Hysteresis logic:
+        # harder to escalate instantly,
+        # easier to recover after waking up.
+
         if previous_level == "safe":
-            if score >= 30:
+            if score >= 38:
                 level = "soft"
             else:
                 level = "safe"
+
         elif previous_level == "soft":
-            if score < 25:
+            if score < 30:
                 level = "safe"
-            elif score >= 50:
+            elif score >= 58:
                 level = "warning"
             else:
                 level = "soft"
+
         elif previous_level == "warning":
-            if score < 45:
+            if score < 48:
                 level = "soft"
-            elif score >= 75:
+            elif score >= 80:
                 level = "danger"
             else:
                 level = "warning"
-        else:  # danger
-            if score < 70:
+
+        else:  # previous danger
+            if score < 68:
                 level = "warning"
             else:
                 level = "danger"
 
         messages = {
             "safe": "Driver appears alert.",
-            "soft": "Gentle warning: signs of fatigue detected.",
-            "warning": "Warning: driver may be getting drowsy.",
-            "danger": "Danger: immediate attention required.",
+            "soft": "Mild fatigue signs detected. Stay attentive.",
+            "warning": "Warning: drowsiness increasing. Consider a break.",
+            "danger": "Critical alert: possible microsleep risk. Wake immediately.",
         }
 
         return {

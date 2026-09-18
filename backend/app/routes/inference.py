@@ -18,9 +18,6 @@ feature_extractor = FeatureExtractor()
 session_store = SessionStateStore(seq_len=45)
 alert_engine = AlertEngine()
 
-# Store last smoothed score per session for realtime smoothing
-score_store: dict[str, float] = {}
-
 
 def decode_frame_base64(frame_base64: str) -> np.ndarray:
     if "," in frame_base64:
@@ -41,6 +38,7 @@ def process_frame(session_id: str, frame_bgr: np.ndarray) -> FrameInferenceRespo
     features = feature_extractor.extract(frame_bgr)
 
     if features is None:
+        session_store.set_eye_closed_count(session_id, 0)
         return FrameInferenceResponse(
             status="no_face_detected",
             session_id=session_id,
@@ -48,10 +46,13 @@ def process_frame(session_id: str, frame_bgr: np.ndarray) -> FrameInferenceRespo
             message="No face detected in frame.",
         )
 
-    session_store.append_features(session_id, features.to_array())
+    feature_vec = features.to_array().astype(np.float32)
+
+    session_store.append_features(session_id, feature_vec)
     sequence = session_store.get_sequence(session_id)
 
     if len(sequence) < model_service.seq_len:
+        session_store.set_eye_closed_count(session_id, 0)
         return FrameInferenceResponse(
             status="collecting",
             session_id=session_id,
@@ -62,19 +63,55 @@ def process_frame(session_id: str, frame_bgr: np.ndarray) -> FrameInferenceRespo
     sequence = sequence[-model_service.seq_len :]
     result = model_service.predict(sequence)
 
-    probs = result["probabilities"]
-    prediction_idx = result["prediction"]
+    probs = np.asarray(result["probabilities"], dtype=np.float32)
+    prediction_idx = int(result["prediction"])
 
     labels = ["alert", "drowsy", "microsleep"]
     prediction = labels[prediction_idx]
 
-    # Raw score from model output
-    fatigue_score = float(probs[1] * 50.0 + probs[2] * 100.0)
+    # Feature layout from feature extractor:
+    # [0] ear_left, [1] ear_right, [2] ear_mean, [3] mar,
+    # [4] head_pitch, [5] head_yaw, [6] head_roll,
+    # [7] blink_flag, [8] yawn_flag, [9] gaze_dev
+    ear_mean = float(feature_vec[2])
+    mar = float(feature_vec[3])
+    blink_flag = float(feature_vec[7])
+    yawn_flag = float(feature_vec[8])
 
-    # Smooth score to avoid sudden jumps and reduce lag
-    previous_score = score_store.get(session_id, fatigue_score)
-    smoothed_score = 0.7 * previous_score + 0.3 * fatigue_score
-    score_store[session_id] = smoothed_score
+    # Duration-based eye closure logic
+    eye_closed_count = session_store.get_eye_closed_count(session_id)
+    if ear_mean < 0.22:
+        eye_closed_count += 1
+    else:
+        eye_closed_count = 0
+    session_store.set_eye_closed_count(session_id, eye_closed_count)
+
+    # Base model contribution
+    prob_score = float(probs[1] * 25.0 + probs[2] * 50.0)
+
+    # Direct physiological contribution
+    eye_score = float(np.clip((0.24 - ear_mean) / 0.12, 0.0, 1.0) * 35.0)
+    mouth_score = float(np.clip((mar - 0.42) / 0.25, 0.0, 1.0) * 10.0)
+
+    # Duration bonus for sustained eye closure
+    duration_bonus = float(min(30.0, eye_closed_count * 4.5))
+
+    # Small cue bonuses
+    blink_bonus = 2.0 if blink_flag > 0 else 0.0
+    yawn_bonus = 4.0 if yawn_flag > 0 else 0.0
+
+    raw_score = prob_score + eye_score + mouth_score + duration_bonus + blink_bonus + yawn_bonus
+    raw_score = float(np.clip(raw_score, 0.0, 100.0))
+
+    # Asymmetric smoothing:
+    # rise slowly, recover faster when the driver wakes up
+    previous_score = session_store.get_last_score(session_id)
+    if raw_score >= previous_score:
+        smoothed_score = 0.65 * previous_score + 0.35 * raw_score
+    else:
+        smoothed_score = 0.82 * previous_score + 0.18 * raw_score
+
+    session_store.set_last_score(session_id, smoothed_score)
 
     previous_level = session_store.get_last_level(session_id)
     alert_result = alert_engine.evaluate(smoothed_score, previous_level=previous_level)
