@@ -104,8 +104,33 @@ def base_to_array(base) -> np.ndarray:
 # ANGLE UNWRAPPING
 # =========================================================
 
-def unwrap_pose_angles(
+def wrap_angle_deg(
+    angle: np.ndarray | float,
+):
+    return (
+        np.asarray(angle) + 180.0
+    ) % 360.0 - 180.0
+
+
+def circular_delta_deg(
+    current: float,
+    previous: float,
+) -> float:
+
+    return float(
+        (
+            current
+            - previous
+            + 180.0
+        )
+        % 360.0
+        - 180.0
+    )
+
+
+def stabilize_pose_angles(
     values: np.ndarray,
+    max_step_degrees: float = 45.0,
 ) -> np.ndarray:
 
     values = values.astype(
@@ -113,7 +138,6 @@ def unwrap_pose_angles(
         copy=True,
     )
 
-    # indices:
     # 6 = yaw
     # 7 = pitch
     # 8 = roll
@@ -124,17 +148,53 @@ def unwrap_pose_angles(
         8,
     ):
 
-        radians = np.deg2rad(
+        raw = wrap_angle_deg(
             values[:, index]
         )
 
-        radians = np.unwrap(
-            radians
+        stable = np.empty_like(
+            raw,
+            dtype=np.float64,
         )
 
-        values[:, index] = np.rad2deg(
-            radians
-        )
+        stable[0] = raw[0]
+
+        for i in range(
+            1,
+            len(raw),
+        ):
+
+            previous_wrapped = float(
+                wrap_angle_deg(
+                    stable[i - 1]
+                )
+            )
+
+            delta = circular_delta_deg(
+                float(raw[i]),
+                previous_wrapped,
+            )
+
+            # A change above 45 degrees in
+            # ~33-40 ms is treated as a
+            # pose-estimation flip/glitch.
+            if abs(delta) > max_step_degrees:
+
+                stable[i] = (
+                    stable[i - 1]
+                )
+
+            else:
+
+                stable[i] = (
+                    stable[i - 1]
+                    + delta
+                )
+
+        values[
+            :,
+            index,
+        ] = stable
 
     return values
 
@@ -170,7 +230,7 @@ def resample_window(
     # before interpolation.
     # ---------------------------------------------
 
-    raw = unwrap_pose_angles(
+    raw = stabilize_pose_angles(
         raw
     )
 
@@ -216,6 +276,26 @@ def resample_window(
                 feature_index,
             ],
         )
+
+    # Keep a continuous version specifically
+    # for correct angular delta calculation.
+    continuous_pose = resampled[
+        :,
+        6:9,
+    ].copy()
+
+
+    resampled[
+        :,
+        6:9,
+    ] = wrap_angle_deg(
+        resampled[
+            :,
+            6:9,
+        ]
+    ).astype(
+        np.float32
+    )
 
 
     # =====================================================
@@ -266,6 +346,8 @@ def resample_window(
         1.0,
     )
 
+    
+
 
     # =====================================================
     # BUILD FINAL 14-FEATURE SEQUENCE
@@ -315,14 +397,14 @@ def resample_window(
     )
 
 
-    # ΔYaw
+   # ΔYaw
     features[
         1:,
         11,
     ] = np.diff(
-        resampled[
+        continuous_pose[
             :,
-            6,
+            0,
         ]
     )
 
@@ -332,9 +414,9 @@ def resample_window(
         1:,
         12,
     ] = np.diff(
-        resampled[
+        continuous_pose[
             :,
-            7,
+            1,
         ]
     )
 
@@ -344,9 +426,9 @@ def resample_window(
         1:,
         13,
     ] = np.diff(
-        resampled[
+        continuous_pose[
             :,
-            8,
+            2,
         ]
     )
 
